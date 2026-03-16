@@ -33,6 +33,9 @@ python3 _httpserver_test.py
 | AUTOPCR_SERVER_DEBUG_LOG      | 是否输出 Debug 日志 | False            |
 | AUTOPCR_SERVER_ALLOW_REGISTER | 是否允许注册        | True             |
 | AUTOPCR_SERVER_SUPERUSER      | 设置无条件拥有管理员的用户 | （可选，设置为登录使用的 QQ） |
+| MAIL_FROM                     | 设置发信地址 | （只支持QQ,163邮箱） |
+| MAIL_PASSWORD                 | 设置发信地址的授权码 |  123456   |
+| MAIL_TO                       | 设置收信地址 | 不限制，可以和发信地址一样 |
 
 ## Credits
 - aiorequests 来自 [HoshinoBot](https://github.com/Ice-Cirno/HoshinoBot)
