@@ -21,6 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug variables
+        run: |
+          echo "DOCKERHUB_IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE_NAME }}"
+          echo "Is empty: ${{ vars.DOCKERHUB_IMAGE_NAME == '' }}"
+
       - name: Set time zone
         uses: szenius/set-timezone@v1.1
         with:
