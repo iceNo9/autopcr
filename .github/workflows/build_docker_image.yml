@@ -26,6 +26,11 @@ jobs:
           echo "DOCKERHUB_IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE_NAME }}"
           echo "Is empty: ${{ vars.DOCKERHUB_IMAGE_NAME == '' }}"
 
+      - name: Debug secrets (values will be hidden)
+        run: |
+          echo "DOCKERHUB_USERNAME length: ${{ secrets.DOCKERHUB_USERNAME != '' && 'set' || 'not set' }}"
+          echo "DOCKERHUB_TOKEN length: ${{ secrets.DOCKERHUB_TOKEN != '' && 'set' || 'not set' }}"
+
       - name: Set time zone
         uses: szenius/set-timezone@v1.1
         with:
