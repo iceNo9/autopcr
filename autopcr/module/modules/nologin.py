@@ -64,6 +64,7 @@ class CampaignSchedule(ISchedule):
         HATSUNE_NORMAL = "活动normal"
         HATSUNE_HARD = "活动hard"
         HATSUNE_BOTH = "活动"
+        SEVEN = "活动"
         HATSUNE_REVIVAL_NORMAL = "复刻活动normal"
         HATSUNE_REVIVAL_HARD = "复刻活动hard"
         HATSUNE_REVIVAL_BOTH = "复刻活动"
@@ -191,27 +192,32 @@ class LoginBonusDatum(ISchedule):
 @default(True)
 @notlogin()
 class half_schedule(Module):
-    schedules = [
-        (db.clan_battle_period, lambda x: ClanBattlePeriod(x.start_time, x.end_time, "公会战")),
-        (db.clan_battle_period, lambda x: ClanBattlePeriod(x.result_start, x.result_end, "公会战排名公示")),
-        (db.secret_dungeon_schedule, lambda x: SecretDungeonSchedule(x.start_time, x.end_time, "特别地下城")),
-        (db.seasonpass_foundation, lambda x: SeasonpassFoundation(x.name, x.start_time, x.end_time, "季卡")),
-        (db.gacha_data, lambda x: GachaDatum(x.gacha_id, x.exchange_id, x.start_time, x.end_time, "扭蛋")),
-        (db.campaign_schedule, lambda x: CampaignSchedule(x.id, x.campaign_category, x.value, x.start_time, x.end_time, "庆典")),
-        (db.campaign_free_gacha, lambda x: CampaignFreegacha(x.campaign_id, x.start_time, x.end_time, "免费十连")),
-        (db.hatsune_schedule, lambda x: HatsuneSchedule(x.event_id, x.start_time, x.end_time, "活动")),
-        (db.tower_schedule, lambda x: TowerSchedule(x.start_time, x.end_time, "露娜塔")),
-        (db.tdf_schedule, lambda x: TdfSchedule(x.start_time, x.end_time, "次元断层")),
-        (db.chara_fortune_schedule, lambda x: CharaFortuneSchedule(x.name, x.start_time, x.end_time, "赛马")),
-        (db.login_bonus_data, lambda x: LoginBonusDatum(x.name, x.start_time, x.end_time, "登录奖励")),
-        (db.colosseum_schedule_data, lambda x: ColosseumScheduleData(x.start_time, x.end_time, "斗技场")),
-        (db.caravan_schedule, lambda x: CaravanSchedule(x.season_id, x.start_time, x.end_time, "驾车游")),
-        (db.dome_schedule_data, lambda x: DomeScheduleData(x.start_time, x.end_time, "新斗技场")),
-        (db.abyss_schedule, lambda x: AbyssSchedule(x.talent_id, x.start_time, x.end_time, "深渊讨伐战")),
-    ]
+    @staticmethod
+    def schedule_sources():
+        # Defer DB property access until execution to keep import-time memory lower.
+        return [
+            (db.clan_battle_period, lambda x: ClanBattlePeriod(x.start_time, x.end_time, "公会战")),
+            (db.clan_battle_period, lambda x: ClanBattlePeriod(x.result_start, x.result_end, "公会战排名公示")),
+            (db.secret_dungeon_schedule, lambda x: SecretDungeonSchedule(x.start_time, x.end_time, "特别地下城")),
+            (db.seasonpass_foundation, lambda x: SeasonpassFoundation(x.name, x.start_time, x.end_time, "季卡")),
+            (db.gacha_data, lambda x: GachaDatum(x.gacha_id, x.exchange_id, x.start_time, x.end_time, "扭蛋")),
+            (db.campaign_schedule, lambda x: CampaignSchedule(x.id, x.campaign_category, x.value, x.start_time, x.end_time, "庆典")),
+            (db.campaign_free_gacha, lambda x: CampaignFreegacha(x.campaign_id, x.start_time, x.end_time, "免费十连")),
+            (db.hatsune_schedule, lambda x: HatsuneSchedule(x.event_id, x.start_time, x.end_time, "活动")),
+            (db.seven_schedule, lambda x: HatsuneSchedule(x.event_id, x.start_time, x.end_time, "活动")),
+            (db.tower_schedule, lambda x: TowerSchedule(x.start_time, x.end_time, "露娜塔")),
+            (db.tdf_schedule, lambda x: TdfSchedule(x.start_time, x.end_time, "次元断层")),
+            (db.chara_fortune_schedule, lambda x: CharaFortuneSchedule(x.name, x.start_time, x.end_time, "赛马")),
+            (db.login_bonus_data, lambda x: LoginBonusDatum(x.name, x.start_time, x.end_time, "登录奖励")),
+            (db.colosseum_schedule_data, lambda x: ColosseumScheduleData(x.start_time, x.end_time, "斗技场")),
+            (db.caravan_schedule, lambda x: CaravanSchedule(x.season_id, x.start_time, x.end_time, "驾车游")),
+            (db.dome_schedule_data, lambda x: DomeScheduleData(x.start_time, x.end_time, "新斗技场")),
+            (db.abyss_schedule, lambda x: AbyssSchedule(x.talent_id, x.start_time, x.end_time, "深渊讨伐战")),
+        ]
+
     async def do_task(self, _: pcrclient):
         schedules = defaultdict(list)
-        for table, factory in self.schedules:
+        for table, factory in self.schedule_sources():
             for row in table.values():
                 schedule = factory(row)
                 if schedule.enabled:

@@ -1,9 +1,11 @@
-from typing import List, Dict, Set, Tuple, Union
+from typing import List, Dict, Set, Tuple, Union, Optional
 import typing
+import asyncio
 from ..model.enums import eCampaignCategory, eParamType
 from ..model.common import ExtraEquipInfo, ExtraEquipSubStatus, UnitData, eInventoryType, RoomUserItem, InventoryInfo
 from ..model.custom import ItemType, eDifficulty
 import datetime
+import time
 from collections import Counter, defaultdict
 from .dbmgr import dbmgr
 from .methods import *
@@ -29,6 +31,7 @@ class lazy_property(Generic[T]):
         if instance is None:
             return self # type: ignore
 
+        instance._touch_cache_access()
         dbmgr = getattr(instance, "dbmgr", None)
         if dbmgr is None:
             raise ValueError("数据库未初始化完成，请稍等片刻")
@@ -67,8 +70,84 @@ class database():
     dark_ball: ItemType = (eInventoryType.Item, 25015)
     ex_rainbow_enhance_pt: ItemType = (eInventoryType.Item, 26202)
 
+    def __init__(self):
+        self.dbmgr: Optional[dbmgr] = None
+        self._cache_active_tasks: int = 0
+        self._cache_last_access: float = time.monotonic()
+        self._cache_cleanup_task: Optional[asyncio.Task] = None
+        self._cache_cooldown_seconds: int = 90
+
     def update(self, dbmgr):
         self.dbmgr = dbmgr
+        self._touch_cache_access()
+
+    def _touch_cache_access(self):
+        self._cache_last_access = time.monotonic()
+
+    def cached_props(self) -> List[str]:
+        return [
+            key[len("__cached_"):] for key in self.__dict__
+            if key.startswith("__cached_") and not key.startswith("__cached_version_")
+        ]
+
+    def clear_cache(self, keep: Optional[Set[str]] = None) -> Tuple[int, int]:
+        keep = keep or set()
+        cached = self.cached_props()
+        before = len(cached)
+        for name in cached:
+            if name in keep:
+                continue
+            self.__dict__.pop(f"__cached_{name}", None)
+            self.__dict__.pop(f"__cached_version_{name}", None)
+        after = len(self.cached_props())
+        return before, after
+
+    async def enter_cache_scope(self):
+        self._cache_active_tasks += 1
+        self._touch_cache_access()
+        if self._cache_cleanup_task and not self._cache_cleanup_task.done():
+            self._cache_cleanup_task.cancel()
+        self._cache_cleanup_task = None
+
+    async def exit_cache_scope(self):
+        self._cache_active_tasks = max(0, self._cache_active_tasks - 1)
+        self._touch_cache_access()
+        if self._cache_active_tasks == 0:
+            self._schedule_idle_cleanup()
+
+    def _schedule_idle_cleanup(self):
+        if self._cache_cleanup_task and not self._cache_cleanup_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._cache_cleanup_task = loop.create_task(self._clear_cache_when_idle())
+
+    async def _clear_cache_when_idle(self):
+        try:
+            while True:
+                if self._cache_active_tasks > 0:
+                    return
+
+                idle_for = time.monotonic() - self._cache_last_access
+                wait = self._cache_cooldown_seconds - idle_for
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                    continue
+
+                before, after = self.clear_cache()
+                if before > after:
+                    logger.info(
+                        f"db cache cleared after idle {idle_for:.1f}s, "
+                        f"cached props: {before} -> {after}"
+                    )
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            if asyncio.current_task() is self._cache_cleanup_task:
+                self._cache_cleanup_task = None
 
     @lazy_property
     def redeem_unit(self) -> Dict[int, Dict[int, RedeemUnit]]:
@@ -395,6 +474,22 @@ class database():
             )
 
     @lazy_property
+    def seven_schedule(self) -> Dict[int, SevenSchedule]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenSchedule.query(db)
+                .to_dict(lambda x: x.event_id, lambda x: x)
+            )
+
+    @lazy_property
+    def seven_schedule_by_schedule_id(self) -> Dict[int, SevenSchedule]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenSchedule.query(db)
+                .to_dict(lambda x: x.schedule_id, lambda x: x)
+            )
+
+    @lazy_property
     def campaign_beginner_data(self) -> Dict[int, CampaignBeginnerDatum]:
         with self.dbmgr.session() as db:
             return (
@@ -664,6 +759,7 @@ class database():
             return (
                 QuestDatum.query(db)
                 .concat(HatsuneQuest.query(db))
+                .concat(SevenQuestDatum.query(db))
                 .concat(ShioriQuest.query(db))
                 .concat(TalentQuestDatum.query(db))
                 .concat(AbyssQuestDatum.query(db))
@@ -782,6 +878,9 @@ class database():
                 .concat(
                     EventStoryDatum.query(db)
                     .select(lambda x: (x.value, x.title))
+                ).concat(
+                    SevenEventSetting.query(db)
+                    .select(lambda x: (x.event_id, x.title))
                 ).to_dict(lambda x: x[0], lambda x: x[1])
             )
 
@@ -791,6 +890,42 @@ class database():
             return (
                 EventStoryDetail.query(db)
                 .to_list()
+            )
+
+    @lazy_property
+    def seven_event_story_data(self) -> Dict[int, List[SevenStoryDatum]]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenStoryDatum.query(db)
+                .where(lambda x: x.contents_type == 0 and x.story_type in (1, 2, 3))
+                .group_by(lambda x: x.event_id)
+                .to_dict(lambda x: x.key, lambda x: sorted(x.to_list(), key=lambda y: (y.story_index, y.story_id)))
+            )
+
+    @lazy_property
+    def seven_obtent_story_data(self) -> Dict[int, List[SevenStoryDatum]]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenStoryDatum.query(db)
+                .where(lambda x: x.contents_type == 4 and x.story_type == 5)
+                .group_by(lambda x: x.event_id)
+                .to_dict(lambda x: x.key, lambda x: sorted(x.to_list(), key=lambda y: y.story_id))
+            )
+
+    @lazy_property
+    def seven_contents_condition(self) -> Dict[Tuple[int, int], SevenContentsCondition]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenContentsCondition.query(db)
+                .to_dict(lambda x: (x.event_id, x.contents_type), lambda x: x)
+            )
+
+    @lazy_property
+    def seven_story_detail(self) -> Dict[int, SevenStoryDatum]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenStoryDatum.query(db)
+                .to_dict(lambda x: x.story_id, lambda x: x)
             )
 
     @lazy_property
@@ -1249,14 +1384,15 @@ class database():
             )
 
     @lazy_property
-    def quest_to_event(self) -> Dict[int, HatsuneQuest]:
+    def quest_to_event(self) -> Dict[int, Union[HatsuneQuest, ShioriQuest, SevenQuestDatum]]:
         with self.dbmgr.session() as db:
             return (
                 HatsuneQuest.query(db)
+                .concat(SevenQuestDatum.query(db))
                 .concat(ShioriQuest.query(db))
                 .to_dict(lambda x: x.quest_id, lambda x: x) # 类型不一致，Hatsune和Shiori是否分开？
             )
-        
+
     @lazy_property
     def hatsune_item(self) -> Dict[int, HatsuneItem]:
         with self.dbmgr.session() as db:
@@ -1264,6 +1400,33 @@ class database():
                 HatsuneItem.query(db)
                 .to_dict(lambda x: x.event_id, lambda x: x)
             )
+
+    @lazy_property
+    def seven_common_mission(self) -> Dict[Tuple[int, int], SevenCommonMissionDatum]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenCommonMissionDatum.query(db)
+                .to_dict(lambda x: (x.mission_group_id, x.mission_id), lambda x: x)
+            )
+
+    @lazy_property
+    def seven_unique_mission(self) -> Dict[Tuple[int, int], SevenUniqueMissionDatum]:
+        with self.dbmgr.session() as db:
+            return (
+                SevenUniqueMissionDatum.query(db)
+                .to_dict(lambda x: (x.event_id, x.mission_id), lambda x: x)
+            )
+
+    @lazy_property
+    def event_quest_data(self) -> Dict[int, List[Union[HatsuneQuest, SevenQuestDatum]]]:
+        with self.dbmgr.session() as db:
+            ret: Dict[int, List[Union[HatsuneQuest, SevenQuestDatum]]] = defaultdict(list)
+            quests = HatsuneQuest.query(db).concat(SevenQuestDatum.query(db)).to_list()
+            for quest in quests:
+                ret[quest.event_id].append(quest)
+            for event_id, quests in ret.items():
+                quests.sort(key=self.get_event_quest_order)
+            return dict(ret)
 
     @lazy_property
     def abd_story_data(self) -> Dict[int, AbdStoryDatum]:
@@ -1596,6 +1759,7 @@ class database():
             ret = (
                 QuestDatum.query(db)
                 .concat(HatsuneQuest.query(db))
+                .concat(SevenQuestDatum.query(db))
                 .concat(ShioriQuest.query(db))
                 .concat(TrainingQuestDatum.query(db))
                 .concat(TalentQuestDatum.query(db))
@@ -1892,6 +2056,63 @@ class database():
         except:
             return f"未知关卡({quest_id})"
 
+    def is_seven_event(self, event_id: int) -> bool:
+        return event_id in self.seven_schedule
+
+    def get_event_quest_order(self, quest: Union[HatsuneQuest, SevenQuestDatum]) -> int:
+        if isinstance(quest, HatsuneQuest):
+            return quest.quest_seq
+        return quest.quest_index
+
+    def is_event_quest_available(self, quest: Union[HatsuneQuest, SevenQuestDatum]) -> bool:
+        if isinstance(quest, HatsuneQuest):
+            return True
+        if quest.condition_time == '0':
+            return True
+        return apiclient.datetime >= self.parse_time(quest.condition_time)
+
+    def get_event_quests(self, event_id: int) -> List[Union[HatsuneQuest, SevenQuestDatum]]:
+        return [quest for quest in self.event_quest_data.get(event_id, []) if self.is_event_quest_available(quest)]
+
+    def get_event_normal_quests(self, event_id: int) -> List[int]:
+        return [quest.quest_id for quest in self.get_event_quests(event_id) if quest.daily_limit == 0]
+
+    def get_event_hard_quests(self, event_id: int) -> List[int]:
+        return [quest.quest_id for quest in self.get_event_quests(event_id) if quest.daily_limit > 0]
+
+    def get_event_normal_quest(self, event_id: int, index: int) -> Optional[int]:
+        quests = self.get_event_normal_quests(event_id)
+        return quests[index - 1] if 1 <= index <= len(quests) else None
+
+    def get_event_hard_quest(self, event_id: int, index: int) -> Optional[int]:
+        quests = self.get_event_hard_quests(event_id)
+        return quests[index - 1] if 1 <= index <= len(quests) else None
+
+    def get_event_gacha_id(self, event_id: int) -> int:
+        if self.is_seven_event(event_id):
+            return self.seven_schedule[event_id].gacha_id
+        return event_id
+
+    def get_event_gacha_ticket_id(self, event_id: int) -> int:
+        if self.is_seven_event(event_id):
+            return self.seven_schedule[event_id].gacha_ticket_id
+        return self.hatsune_item[event_id].gacha_ticket_id
+
+    def get_event_schedule_id(self, event_id: int) -> int:
+        return self.seven_schedule[event_id].schedule_id
+
+    def get_seven_mission_type(self, event_id: int, mission) -> int:
+        schedule = self.seven_schedule[event_id]
+        common = self.seven_common_mission.get((schedule.mission_group_id, mission.mission_id))
+        if common:
+            return common.mission_type
+
+        unique = self.seven_unique_mission.get((event_id, mission.mission_id))
+        if unique:
+            return unique.mission_type
+
+        raise KeyError(f"无法确定seven活动任务类型: {event_id}:{mission.mission_id}")
+
     def is_daily_mission(self, mission_id: int) -> bool:
         return mission_id in self.daily_mission_data or mission_id in self.season_pack
 
@@ -1961,6 +2182,9 @@ class database():
     def is_hatsune_quest(self, quest_id: int) -> bool:
         return quest_id // 1000000 == 10
 
+    def is_event_quest(self, quest_id: int) -> bool:
+        return self.is_hatsune_quest(quest_id) and quest_id in self.quest_to_event
+
     def is_talent_quest(self, quest_id: int) -> bool:
         top = quest_id // 1000000
         return top >= 81 and top <= 85
@@ -1969,10 +2193,16 @@ class database():
         return quest_id // 1000000 == 92
 
     def is_hatsune_normal_quest(self, quest_id: int) -> bool:
-        return self.is_hatsune_quest(quest_id) and (quest_id // 100) % 10 == 1
+        return self.is_event_normal_quest(quest_id)
 
     def is_hatsune_hard_quest(self, quest_id: int) -> bool:
-        return self.is_hatsune_quest(quest_id) and (quest_id // 100) % 10 == 2
+        return self.is_event_hard_quest(quest_id)
+
+    def is_event_normal_quest(self, quest_id: int) -> bool:
+        return self.is_event_quest(quest_id) and self.quest_info[quest_id].daily_limit == 0
+
+    def is_event_hard_quest(self, quest_id: int) -> bool:
+        return self.is_event_quest(quest_id) and self.quest_info[quest_id].daily_limit > 0
 
     def is_shiori_quest(self, quest_id: int) -> bool:
         return quest_id // 1000000 == 20
@@ -2041,19 +2271,31 @@ class database():
                 .where(lambda x: now >= self.parse_time(x.start_time) and now <= self.parse_time(x.end_time)) \
                 .to_list()
 
+    def get_active_seven(self) -> List[SevenSchedule]:
+        now = apiclient.datetime
+        return flow(self.seven_schedule.values()) \
+                .where(lambda x: now >= self.parse_time(x.start_time) and now <= self.parse_time(x.end_time)) \
+                .to_list()
+
+    def get_active_event(self) -> List[Union[HatsuneSchedule, SevenSchedule]]:
+        return self.get_active_hatsune() + self.get_active_seven()
+
     def get_active_hatsune_id(self) -> List[int]:
-        active_hatsune = self.get_active_hatsune()
+        active_hatsune = self.get_active_event()
         return [event.event_id for event in active_hatsune]
 
     def get_active_hatsune_name(self) -> List[str]:
-        active_hatsune = self.get_active_hatsune()
-        return [f"{event.event_id}:{db.event_name[event.event_id]}" for event in active_hatsune]
+        active_hatsune = self.get_active_event()
+        return [f"{event.event_id}:{db.event_name.get(event.event_id, event.event_id)}" for event in active_hatsune]
 
     def get_open_hatsune(self) -> List[HatsuneSchedule]:
         now = apiclient.datetime
         return flow(self.hatsune_schedule.values()) \
                 .where(lambda x: now >= self.parse_time(x.start_time) and now <= self.parse_time(x.close_time)) \
                 .to_list()
+
+    def get_open_event(self) -> List[Union[HatsuneSchedule, SevenSchedule]]:
+        return self.get_open_hatsune() + self.get_active_seven()
 
     def get_active_abyss(self) -> List[AbyssSchedule]:
         now = apiclient.datetime
@@ -2123,12 +2365,15 @@ class database():
                 .select(lambda x: (db.parse_time(x.start_time), db.parse_time(x.end_time)))
                 .to_list()
              )
+        is_afternoon = now >= self.get_start_time(now) + half_day
         campaign_list = {
             "n3以上前夕": lambda: not self.is_target_time(n3, now) and self.is_target_time(n3, tomorrow),
             "n3以上首日午前": lambda: self.is_target_time(n3, now) and not self.is_target_time(n3, now - half_day),
             "h3以上前夕": lambda: not self.is_target_time(h3, now) and self.is_target_time(h3, tomorrow),
             "会战前夕": lambda: not self.is_clan_battle_time(now) and self.is_clan_battle_time(tomorrow),
+            "会战前夕午后": lambda: not self.is_clan_battle_time(now) and self.is_clan_battle_time(tomorrow) and is_afternoon,
             "会战期间": lambda: self.is_clan_battle_time(now),
+            "会战期间午后": lambda: self.is_clan_battle_time(now) and is_afternoon,
             "总是执行": lambda: True,
         }
         if campaign not in campaign_list:

@@ -1,11 +1,11 @@
 import asyncio
 
 from .httpserver import HttpServer
-from ..constants import SERVER_PORT
+from ..constants import SERVER_PORT, SERVER_HOST
 from ..db.dbstart import db_start
 from ..module.crons import queue_crons
 
-server = HttpServer(port=SERVER_PORT)
+server = HttpServer(host=SERVER_HOST, port=SERVER_PORT)
 
 queue_crons()
 
