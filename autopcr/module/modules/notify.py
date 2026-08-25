@@ -6,6 +6,7 @@ from email.mime.text import MIMEText
 
 from ...model.enums import *
 from ...model.error import *
+from ...util.logger import instance as logger
 from ..config import *
 from ..modulebase import *
 
@@ -104,10 +105,10 @@ class SmtpNotify(NotifyModule):
             return server
 
         except smtplib.SMTPException as e:
-            print(f"SMTP 连接失败: {e}")
+            logger.error(f"SMTP 连接失败: {e}")
             return None
         except Exception as e:
-            print(f"连接失败: {e}")
+            logger.error(f"连接失败: {e}")
             return None
 
     def _close_server(self):
@@ -115,7 +116,8 @@ class SmtpNotify(NotifyModule):
         if self._server is not None:
             try:
                 self._server.quit()
-            except Exception:
+            except Exception as e:
+                logger.warning(f"关闭 SMTP 连接时出错: {e}")
                 pass
             self._server = None
 
@@ -135,12 +137,12 @@ class SmtpNotify(NotifyModule):
             return False
         return bool(password)
 
-
     async def send_notification(
         self, subject: str, body: str, is_html: bool = False
     ) -> bool:
         """发送 SMTP 邮件（复用连接）"""
         if not self.is_configured():
+            logger.warning("邮件通知未配置，跳过发送")
             return False
 
         user = self.get_notify_email_user()
@@ -158,27 +160,31 @@ class SmtpNotify(NotifyModule):
                 return False
 
             server.sendmail(user, [to], msg.as_string())
+            logger.info(f"邮件发送成功: {subject} -> {to}")
             return True
 
         except smtplib.SMTPServerDisconnected:
+            logger.warning("SMTP 连接已断开，尝试重新连接...")
             # 连接断开，尝试重新连接
             self._close_server()
             server = self._get_server()
             if server is None:
+                logger.error("重新连接 SMTP 失败")
                 return False
             try:
                 server.sendmail(user, [to], msg.as_string())
+                logger.info(f"邮件重发成功: {subject} -> {to}")
                 return True
             except Exception as e:
-                print(f"重发邮件失败: {e}")
+                logger.error(f"重发邮件失败: {e}")
                 return False
 
         except smtplib.SMTPException as e:
-            print(f"SMTP 邮件发送失败: {e}")
+            logger.error(f"SMTP 邮件发送失败: {e}")
             self._close_server()
             return False
         except Exception as e:
-            print(f"邮件发送失败: {e}")
+            logger.error(f"邮件发送失败: {e}")
             return False
 
 

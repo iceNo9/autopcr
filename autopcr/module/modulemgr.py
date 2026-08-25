@@ -4,6 +4,7 @@ from dataclasses_json import dataclass_json
 from typing import List, Dict
 from abc import abstractmethod, abstractproperty
 
+from ..util.logger import instance as logger
 from ..util.draw import instance as drawer
 from ..model.error import *
 from ..model.enums import *
@@ -214,5 +215,5 @@ class ModuleManager:
                         is_html=True
                     )
                     
-        except Exception as e:
-            print(f"发送邮件报告失败: {e}")
+        except Exception:
+            logger.exception("发送邮件报告失败: ")
